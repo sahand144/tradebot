@@ -1,140 +1,103 @@
-import os
 import logging
+import os
 import requests
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
-from googletrans import Translator
+from telegram import Update, ForceReply
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from flask import Flask
 from threading import Thread
+from googletrans import Translator
+import datetime
+import yfinance as yf
 
-# Load environment variables
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-
-# Setup logging
+# Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-logger = logging.getLogger(__name__)
 
-# Initialize translator
+# Setup
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 translator = Translator()
 
-# Flask app for keeping bot alive
 app = Flask(__name__)
 
 @app.route('/')
-def index():
-    return "Bot is running"
+def home():
+    return "Bot is alive!"
 
-def run_flask():
+def run():
     app.run(host='0.0.0.0', port=8080)
 
-# ----- Feature Functions ----- #
+Thread(target=run).start()
 
-# Get price of any crypto or stock (basic public API)
-def get_price(query):
-    query = query.lower().replace(" ", "-")
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={query}&vs_currencies=usd"
+# Helper Functions
+def get_crypto_price(symbol):
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
     response = requests.get(url)
     data = response.json()
-    if query in data:
-        return f"💰 {query.capitalize()} price: ${data[query]['usd']:,}"
-    else:
-        return "🚫 رمز ارز یا سهم مورد نظر یافت نشد. لطفا دوباره تلاش کنید."
+    price = data.get(symbol, {}).get("usd")
+    return price
 
-# Get technical analysis - dummy logic for now
-def get_analysis(query, strategy):
-    query = query.capitalize()
-    analysis = f"📊 تحلیل {strategy.upper()} برای {query}:
-"
-    if strategy.lower() == "rsi":
-        analysis += "شاخص RSI در ناحیه اشباع فروش است. احتمال صعودی بودن بازار وجود دارد."
-    elif strategy.lower() == "macd":
-        analysis += "سیگنال MACD به تازگی کراس کرده است. احتمال بازگشت روند وجود دارد."
-    else:
-        analysis += "استراتژی تعریف نشده. لطفا RSI یا MACD وارد کنید."
-    return analysis
-
-# Get news headlines
-
-def get_news(query):
+def get_news():
     if not NEWS_API_KEY:
-        return "📰 برای اخبار نیاز به API Key از newsapi.org داریم."
-    url = f"https://newsapi.org/v2/everything?q={query}&sortBy=publishedAt&apiKey={NEWS_API_KEY}&language=en"
-    response = requests.get(url)
-    articles = response.json().get("articles", [])[:3]
-    if not articles:
-        return "❌ خبری یافت نشد."
-    result = f"📰 آخرین اخبار درباره {query}:
-"
-    for art in articles:
-        result += f"🔹 {art['title']}\n🔗 {art['url']}\n\n"
-    return result
+        return "🛑 News API Key not set."
+    url = f"https://newsapi.org/v2/top-headlines?q=stock+OR+crypto&language=en&apiKey={NEWS_API_KEY}"
+    response = requests.get(url).json()
+    articles = response.get("articles", [])[:5]
+    return "\n\n".join([f"📰 {a['title']}\n{a['url']}" for a in articles])
 
-# Detect Persian and translate
+def predict_price(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="1mo")
+        closing = hist['Close']
+        recent_price = closing[-1]
+        average = closing.mean()
+        if recent_price > average:
+            return f"📊 Prediction: Price may drop soon.\nCurrent: ${recent_price:.2f} | 30d Avg: ${average:.2f}"
+        else:
+            return f"📈 Prediction: Price may rise.\nCurrent: ${recent_price:.2f} | 30d Avg: ${average:.2f}"
+    except:
+        return "❌ Couldn't retrieve historical data. Try a valid stock/crypto ticker."
 
-def translate_if_needed(text):
-    detected_lang = translator.detect(text).lang
-    if detected_lang == 'fa':
-        return translator.translate(text, src='fa', dest='en').text, 'fa'
-    return text, 'en'
-
-# --- Bot Handlers --- #
-
-# Start Command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reply_keyboard = [['💹 استعلام قیمت', '📈 تحلیل تکنیکال'], ['🗞️ اخبار', '🔮 پیش‌بینی']]
-    await update.message.reply_text(
-        "سلام! من دستیار معاملاتی تو هستم. هر چیزی درباره ارز دیجیتال یا بورس بپرس یا از منوی زیر انتخاب کن:",
-        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resize_keyboard=True)
-    )
-
-# Main Message Handler
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# AI-style Message Handler
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text
-    translated, lang = translate_if_needed(user_input)
+    lang = translator.detect(user_input).lang
+    if lang == "fa":
+        user_input = translator.translate(user_input, src="fa", dest="en").text
 
-    # Check for menu text
-    if "قیمت" in user_input or "price" in translated.lower():
-        await update.message.reply_text("نام ارز یا سهم را وارد کن:")
-        return
-    if "تحلیل" in user_input or "analysis" in translated.lower():
-        await update.message.reply_text("نام ارز/سهم و استراتژی مورد نظر را بنویس. مثلا: bitcoin RSI")
-        return
-    if "خبر" in user_input or "news" in translated.lower():
-        await update.message.reply_text("درباره چی میخوای خبر بخونی؟ اسم ارز یا سهم رو بفرست.")
-        return
-    if "پیش‌بینی" in user_input or "predict" in translated.lower():
-        await update.message.reply_text("🔮 در حال توسعه! به زودی میتونی آینده بازار رو هم از من بپرسی!")
-        return
+    text = user_input.lower()
+    response = "🤖 I didn't understand that. Try asking about a crypto or stock."
 
-    words = translated.split()
-    if len(words) == 1:
-        price = get_price(words[0])
-        await update.message.reply_text(price)
-        news = get_news(words[0])
-        await update.message.reply_text(news)
-    elif len(words) == 2:
-        asset, strategy = words
-        analysis = get_analysis(asset, strategy)
-        await update.message.reply_text(analysis)
-    else:
-        await update.message.reply_text("❓ لطفا فقط نام ارز/سهم یا استراتژی رو دقیق وارد کن.")
+    if "price" in text:
+        words = text.split()
+        for word in words:
+            price = get_crypto_price(word.lower())
+            if price:
+                response = f"💰 {word.upper()} price: ${price:.2f}"
+                break
+    elif "news" in text:
+        response = get_news()
+    elif "predict" in text:
+        words = text.split()
+        for word in words:
+            prediction = predict_price(word.upper())
+            if "Prediction" in prediction:
+                response = prediction
+                break
+    elif any(w in text for w in ["hi", "hello", "salam"]):
+        response = "👋 Hi! Ask me about any crypto or stock, or say 'news' or 'predict BTC'."
 
-# --- Start Bot --- #
-def main():
-    flask_thread = Thread(target=run_flask)
-    flask_thread.start()
+    if lang == "fa":
+        response = translator.translate(response, src="en", dest="fa").text
 
-    from telegram.ext import ApplicationBuilder
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    await update.message.reply_text(response)
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-
-    application.run_polling()
-
+# Bot Setup
 if __name__ == '__main__':
-    main()
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    print("✅ Bot is running...")
+    app_bot.run_polling()
