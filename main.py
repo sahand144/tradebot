@@ -22,7 +22,7 @@ def keep_alive():
 # --- Telegram Bot Logic ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-BOT_TOKEN = os.getenv("7562519127:AAH5hfhf4kQKt2FMGGNSYArCYMAX1ihDHLs")
+BOT_TOKEN = os.getenv("7562519127:AAEXdh3hDKAMeaI-oYCjVaXfwTBb7Vamb9Q")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Hello! I’m your Trading Assistant Bot.\nSend /help to learn what I can do.")
