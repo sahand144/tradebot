@@ -1,8 +1,9 @@
-python-telegram-bot==20.3
+python-telegram-bot==20.7
 Flask==2.2.5
-yfinance
-torch
-numpy
 requests
-datetime
+yfinance
+pandas
+numpy
 scikit-learn
+keras
+tensorflow
