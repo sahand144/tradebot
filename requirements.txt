@@ -1,9 +1,2 @@
 python-telegram-bot==20.7
-Flask==2.2.5
-requests
-yfinance
-pandas
-numpy
-scikit-learn
-keras
-tensorflow
+python-dotenv
