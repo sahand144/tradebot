@@ -4,3 +4,5 @@ yfinance
 torch
 numpy
 requests
+tensorflow
+scikit-learn
