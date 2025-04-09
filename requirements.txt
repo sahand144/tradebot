@@ -4,5 +4,5 @@ yfinance
 torch
 numpy
 requests
-tensorflow
+datetime
 scikit-learn
