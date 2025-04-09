@@ -1,175 +1,162 @@
+# main.py
+
 import os
 import logging
-from datetime import datetime, timedelta
-from threading import Thread
-
+import asyncio
+import requests
 import yfinance as yf
 import numpy as np
-import torch
-import torch.nn as nn
-import requests
+from datetime import datetime, timedelta
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (ApplicationBuilder, CommandHandler, ContextTypes,
-                          MessageHandler, filters, CallbackQueryHandler)
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from keras.models import Sequential
+from keras.layers import LSTM, Dense
+from sklearn.preprocessing import MinMaxScaler
 
 # Logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
 
-# Flask
-app = Flask(__name__)
-
-# Environment Variables
+# Bot Token
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Telegram Menu Buttons
-def get_main_menu():
-    keyboard = [
-        [InlineKeyboardButton("💰 Get Price", callback_data='price')],
-        [InlineKeyboardButton("🔮 Predict Price (AI)", callback_data='predict')],
-        [InlineKeyboardButton("📊 Market Trends", callback_data='trends')],
-        [InlineKeyboardButton("🤖 AI Buy/Sell Suggestions", callback_data='ai_trade')],
-        [InlineKeyboardButton("📜 Help", callback_data='help')]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+# Flask App (keep alive on Railway)
+app = Flask(__name__)
 
-# LSTM Model
-def create_lstm_model(input_size=1, hidden_size=50, num_layers=2):
-    class LSTMModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-            self.fc = nn.Linear(hidden_size, 1)
+@app.route('/')
+def index():
+    return "🚀 Telegram AI Trading Bot is running!"
 
-        def forward(self, x):
-            out, _ = self.lstm(x)
-            return self.fc(out[:, -1, :])
-    return LSTMModel()
+# 🔹 LSTM Prediction
+async def lstm_predict(symbol):
+    try:
+        df = yf.download(symbol, period="60d", interval="1d")
+        if len(df) < 30:
+            return "⚠️ Not enough data to predict."
+        
+        scaler = MinMaxScaler()
+        data = scaler.fit_transform(df["Close"].values.reshape(-1, 1))
 
-async def train_and_predict_lstm(symbol):
-    stock = yf.Ticker(symbol)
-    hist = stock.history(period="60d")['Close'].values
-    if len(hist) < 10:
-        return "❌ Not enough data to predict."
+        x, y = [], []
+        for i in range(30, len(data)):
+            x.append(data[i-30:i])
+            y.append(data[i])
 
-    seq_len = 10
-    X, y = [], []
-    for i in range(len(hist) - seq_len):
-        X.append(hist[i:i+seq_len])
-        y.append(hist[i+seq_len])
+        x, y = np.array(x), np.array(y)
+        x = x.reshape(x.shape[0], x.shape[1], 1)
 
-    X, y = np.array(X), np.array(y)
-    X = torch.tensor(X, dtype=torch.float32).unsqueeze(-1)
-    y = torch.tensor(y, dtype=torch.float32)
+        model = Sequential()
+        model.add(LSTM(50, return_sequences=False, input_shape=(30, 1)))
+        model.add(Dense(1))
+        model.compile(optimizer='adam', loss='mse')
+        model.fit(x, y, epochs=5, batch_size=1, verbose=0)
 
-    model = create_lstm_model()
-    loss_fn = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        last_30 = data[-30:]
+        future = model.predict(last_30.reshape(1, 30, 1))[0][0]
+        predicted_price = scaler.inverse_transform([[future]])[0][0]
+        return f"🔮 LSTM Predicted Price for {symbol.upper()}: ${round(predicted_price, 2)}"
 
-    model.train()
-    for epoch in range(20):
-        optimizer.zero_grad()
-        out = model(X)
-        loss = loss_fn(out.squeeze(), y)
-        loss.backward()
-        optimizer.step()
+    except Exception as e:
+        return f"❌ LSTM Prediction Error: {e}"
 
-    last_seq = torch.tensor(hist[-seq_len:], dtype=torch.float32).unsqueeze(0).unsqueeze(-1)
-    model.eval()
-    pred = model(last_seq).item()
-    return f"🔮 Predicted next price for {symbol.upper()}: ${round(pred, 2)}"
-
-# Price API
+# 🔹 Price Fetch
 async def get_price(symbol):
     try:
         if symbol.upper() in ['BTC', 'ETH', 'DOGE']:
-            url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol.lower()}&vs_currencies=usd"
-            res = requests.get(url).json()
-            return f"💰 {symbol.upper()} Price: ${res[symbol.lower()]['usd']}"
+            res = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={symbol.lower()}&vs_currencies=usd").json()
+            price = res[symbol.lower()]['usd']
+            return f"💰 {symbol.upper()} Price: ${price}"
         else:
-            price = yf.Ticker(symbol).history(period="1d")["Close"].iloc[-1]
+            stock = yf.Ticker(symbol)
+            price = stock.history(period="1d")["Close"].iloc[-1]
             return f"📈 {symbol.upper()} Stock Price: ${round(price, 2)}"
     except:
-        return "❌ Could not fetch price."
+        return "⚠️ Could not fetch price."
 
-# AI Trade Suggestion
-async def ai_trade_suggestion(symbol):
+# 🔹 Market Trend
+async def market_trend(symbol):
     try:
-        hist = yf.Ticker(symbol).history(period="15d")['Close']
-        change = hist.pct_change().mean()
-        if change > 0.01:
-            return f"📈 {symbol.upper()}: Suggestion ➡️ BUY (upward trend)"
-        elif change < -0.01:
-            return f"📉 {symbol.upper()}: Suggestion ➡️ SELL (downward trend)"
+        df = yf.download(symbol, period="7d", interval="1d")
+        if len(df) < 2:
+            return "⚠️ Not enough data for trend."
+        change = df["Close"].iloc[-1] - df["Close"].iloc[0]
+        if change > 0:
+            return f"📊 Market Trend for {symbol.upper()}: 📈 UP (${round(change, 2)} gain)"
         else:
-            return f"➖ {symbol.upper()}: Suggestion ➡️ HOLD (neutral trend)"
+            return f"📉 Market Trend for {symbol.upper()}: DOWN (${round(change, 2)} loss)"
     except:
-        return "❌ Could not analyze trend."
+        return "❌ Trend analysis failed."
 
-# Command Handlers
+# 🔹 AI Suggestion
+async def ai_suggest(symbol):
+    try:
+        df = yf.download(symbol, period="10d")
+        close = df["Close"]
+        if close.iloc[-1] > close.mean():
+            return f"✅ AI Suggestion: Consider Buying {symbol.upper()}"
+        else:
+            return f"❌ AI Suggestion: Avoid Buying {symbol.upper()} for now"
+    except:
+        return "❌ Suggestion failed."
+
+# 🔹 Start Menu
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Welcome to AI Trading Bot!", reply_markup=get_main_menu())
+    buttons = [
+        [KeyboardButton("💰 Price"), KeyboardButton("🔮 Predict")],
+        [KeyboardButton("📊 Trend"), KeyboardButton("🧠 AI Suggest")],
+        [KeyboardButton("ℹ️ Help")]
+    ]
+    markup = ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+    await update.message.reply_text("👋 Welcome to AI Trading Bot!\nChoose an option below:", reply_markup=markup)
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send a symbol (like BTC, AAPL) or use the menu.")
-
-# Callback Handler for Menu
-async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    action = query.data
-
-    if action == 'price':
-        await query.edit_message_text("💬 Send the symbol you want to get price for.")
-        context.user_data['mode'] = 'price'
-    elif action == 'predict':
-        await query.edit_message_text("💬 Send the symbol for price prediction (AI powered).")
-        context.user_data['mode'] = 'predict'
-    elif action == 'trends':
-        await query.edit_message_text("💬 Send the symbol for market trend analysis.")
-        context.user_data['mode'] = 'trend'
-    elif action == 'ai_trade':
-        await query.edit_message_text("💬 Send the symbol for AI Buy/Sell Suggestion.")
-        context.user_data['mode'] = 'ai_trade'
-    elif action == 'help':
-        await query.edit_message_text("Send a symbol (like BTC, AAPL) or use the menu.")
-
-# Message Handler
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().upper()
-    mode = context.user_data.get('mode', '')
-
-    if mode == 'price':
-        msg = await get_price(text)
-    elif mode == 'predict':
-        msg = await train_and_predict_lstm(text)
-    elif mode == 'trend':
-        msg = await ai_trade_suggestion(text)
-    elif mode == 'ai_trade':
-        msg = await ai_trade_suggestion(text)
-    else:
-        msg = "❓ Please select an option from the menu using /start."
-
+# 🔹 Help
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = ("📘 Commands:\n"
+           "- 💰 Price: Enter a symbol (e.g., BTC, AAPL)\n"
+           "- 🔮 Predict: Trains LSTM model and forecasts next price\n"
+           "- 📊 Trend: Analyzes last 7 days\n"
+           "- 🧠 AI Suggest: Simple buy/sell idea")
     await update.message.reply_text(msg)
 
-# Flask Route
-@app.route('/')
-def index():
-    return 'Bot is running!'
+# 🔹 Handle Messages
+async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
 
-# Run Bot + Flask
-if __name__ == '__main__':
-    async def main():
-        app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
-        app_bot.add_handler(CommandHandler("start", start))
-        app_bot.add_handler(CommandHandler("help", help_cmd))
-        app_bot.add_handler(CallbackQueryHandler(menu_handler))
-        app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        await app_bot.run_polling()
+    if text == "💰 price":
+        await update.message.reply_text("Send the symbol (e.g., BTC, AAPL):")
+        return
+    elif text == "🔮 predict":
+        await update.message.reply_text("Send symbol to train LSTM and predict:")
+        return
+    elif text == "📊 trend":
+        await update.message.reply_text("Send symbol to check trend:")
+        return
+    elif text == "🧠 ai suggest":
+        await update.message.reply_text("Send symbol for AI recommendation:")
+        return
+    elif text == "ℹ️ help":
+        await help_command(update, context)
+        return
 
-    def run_bot():
-        import asyncio
-        asyncio.run(main())
+    # Handle user input symbols dynamically
+    if len(text) <= 6:
+        price = await get_price(text.upper())
+        trend = await market_trend(text.upper())
+        prediction = await lstm_predict(text.upper())
+        suggestion = await ai_suggest(text.upper())
+        msg = f"{price}\n\n{trend}\n\n{prediction}\n\n{suggestion}"
+        await update.message.reply_text(msg)
+    else:
+        await update.message.reply_text("❓ Invalid input. Type /start to choose again.")
 
-    Thread(target=run_bot).start()
-    app.run(host='0.0.0.0', port=8080)
+# 🔹 Main
+async def main():
+    bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    bot.add_handler(CommandHandler("start", start))
+    bot.add_handler(CommandHandler("help", help_command))
+    bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
+    await bot.run_polling()
+
+# 🔹 Start Everything
+if __name__ == "__main__":
+    asyncio.run(main())
