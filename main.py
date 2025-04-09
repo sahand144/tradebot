@@ -1,12 +1,11 @@
 # main.py
 import os
 import logging
-from flask import Flask, request
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import requests
 import yfinance as yf
-from datetime import datetime, timedelta
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from datetime import datetime
 
 # Logging
 logging.basicConfig(
@@ -14,66 +13,66 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Environment Variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# App
-app = Flask(__name__)
-
-# Helper: Get Price
+# Helper: Get Crypto or Stock Price
 async def get_price(symbol):
-    if symbol.upper() in ['BTC', 'ETH', 'DOGE']:  # Crypto symbols
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol.lower()}&vs_currencies=usd"
-        res = requests.get(url).json()
-        return f"💰 {symbol.upper()} Price: ${res[symbol.lower()]['usd']}"
-    else:
-        stock = yf.Ticker(symbol)
-        price = stock.history(period="1d")["Close"].iloc[-1]
-        return f"📈 {symbol.upper()} Stock Price: ${round(price, 2)}"
+    try:
+        if symbol.upper() in ['BTC', 'ETH', 'DOGE']:  # Crypto
+            url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol.lower()}&vs_currencies=usd"
+            res = requests.get(url).json()
+            price = res[symbol.lower()]['usd']
+            return f"💰 {symbol.upper()} Price: ${price}"
+        else:  # Stock
+            stock = yf.Ticker(symbol)
+            price = stock.history(period="1d")["Close"].iloc[-1]
+            return f"📈 {symbol.upper()} Stock Price: ${round(price, 2)}"
+    except:
+        return f"⚠️ Could not get price for '{symbol}'"
 
-# Helper: Predict Future Price
+# Helper: Predict Price
 async def predict_price(symbol):
     try:
         stock = yf.Ticker(symbol)
         hist = stock.history(period="30d")
         if len(hist) < 2:
-            return "Not enough data to predict."
+            return "❌ Not enough data to predict."
         last_price = hist['Close'].iloc[-1]
         prev_price = hist['Close'].iloc[-2]
         predicted = last_price + (last_price - prev_price)
-        return f"🔮 Tomorrow's estimated price of {symbol.upper()}: ${round(predicted, 2)}"
+        return f"🔮 Estimated tomorrow price for {symbol.upper()}: ${round(predicted, 2)}"
     except:
-        return "Prediction failed. Check the symbol."
+        return "⚠️ Prediction failed. Invalid symbol?"
 
-# Helper: Get News (fallback without API key)
+# Helper: Free News from Reddit RSS
 async def get_news():
+    url = "https://www.reddit.com/r/investing/.rss"
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        url = "https://www.coindesk.com/arc/outboundfeeds/rss/"
-        res = requests.get(url)
+        res = requests.get(url, headers=headers)
         if res.status_code != 200:
-            return "❌ No news available."
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(res.content)
-        items = root.findall(".//item")[:5]
-        return "🗞 Top Business News:\n" + "\n\n".join([f"➡️ {item.find('title').text}\n{item.find('link').text}" for item in items])
+            return "❌ Could not fetch news."
+        items = res.text.split("<title>")[2:7]
+        return "🗞 Top Finance News:\n" + "\n\n".join([f"➡️ {i.split('</title>')[0]}" for i in items])
     except:
-        return "❌ Unable to fetch news."
+        return "⚠️ Failed to fetch news."
 
-# Commands
+# Command: /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Welcome! I can give you prices, predictions, and news. Just type anything like:\n- BTC\n- AAPL\n- Predict BTC\n- News")
+    await update.message.reply_text("👋 Welcome! I can show prices, predictions & news.\nExamples:\n- BTC\n- AAPL\n- predict BTC\n- news")
 
+# Command: /help
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Commands:\n- Get price: BTC, ETH, AAPL, etc.\n- Predict: Predict BTC, Predict AAPL\n- News: Get latest financial news\nMore coming soon!")
+    await update.message.reply_text("Commands:\n- BTC, ETH, AAPL etc. for prices\n- predict BTC / AAPL\n- news")
 
-# Chat Handler
+# Natural chat handler
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower()
     if text.startswith("predict"):
-        symbol = text.split("predict")[-1].strip()
+        symbol = text.replace("predict", "").strip()
         msg = await predict_price(symbol)
         await update.message.reply_text(msg)
-    elif text.startswith("news"):
+    elif "news" in text:
         msg = await get_news()
         await update.message.reply_text(msg)
     else:
@@ -81,30 +80,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await get_price(symbol)
         await update.message.reply_text(msg)
 
-# Flask route to keep bot alive
-@app.route("/")
-def index():
-    return "Bot is running!"
-
-# Main Bot Function
+# Run bot directly (NO Flask!)
 if __name__ == '__main__':
-    import asyncio
-    import threading
-
-    async def main():
-        application = ApplicationBuilder().token(BOT_TOKEN).build()
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_cmd))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        await application.initialize()
-        await application.start()
-        print("Bot polling...")
-        await application.updater.start_polling()
-
-    def run_telegram():
-        asyncio.run(main())
-
-    thread = threading.Thread(target=run_telegram, daemon=True)
-    thread.start()
-
-    app.run(host='0.0.0.0', port=8080)
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.run_polling()
