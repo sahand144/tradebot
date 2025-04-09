@@ -1,13 +1,12 @@
-import logging
+# main.py
 import os
-import requests
-from telegram import Update, ForceReply
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+import logging
 from flask import Flask
-from threading import Thread
-from googletrans import Translator
-import datetime
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+import requests
 import yfinance as yf
+from datetime import datetime
 
 # Logging
 logging.basicConfig(
@@ -15,89 +14,97 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Setup
+# Environment Variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-translator = Translator()
 
+# App
 app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return "Bot is alive!"
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-Thread(target=run).start()
-
-# Helper Functions
-def get_crypto_price(symbol):
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
-    response = requests.get(url)
-    data = response.json()
-    price = data.get(symbol, {}).get("usd")
-    return price
-
-def get_news():
-    if not NEWS_API_KEY:
-        return "🛑 News API Key not set."
-    url = f"https://newsapi.org/v2/top-headlines?q=stock+OR+crypto&language=en&apiKey={NEWS_API_KEY}"
-    response = requests.get(url).json()
-    articles = response.get("articles", [])[:5]
-    return "\n\n".join([f"📰 {a['title']}\n{a['url']}" for a in articles])
-
-def predict_price(ticker):
+# Helper: Get Price
+async def get_price(symbol):
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="1mo")
-        closing = hist['Close']
-        recent_price = closing[-1]
-        average = closing.mean()
-        if recent_price > average:
-            return f"📊 Prediction: Price may drop soon.\nCurrent: ${recent_price:.2f} | 30d Avg: ${average:.2f}"
+        if symbol.upper() in ['BTC', 'ETH', 'DOGE']:  # Crypto symbols
+            url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol.lower()}&vs_currencies=usd"
+            res = requests.get(url).json()
+            return f"💰 {symbol.upper()} Price: ${res[symbol.lower()]['usd']}"
         else:
-            return f"📈 Prediction: Price may rise.\nCurrent: ${recent_price:.2f} | 30d Avg: ${average:.2f}"
+            stock = yf.Ticker(symbol)
+            price = stock.history(period="1d")["Close"].iloc[-1]
+            return f"📈 {symbol.upper()} Stock Price: ${round(price, 2)}"
     except:
-        return "❌ Couldn't retrieve historical data. Try a valid stock/crypto ticker."
+        return "⚠️ Could not fetch the price. Please check the symbol."
 
-# AI-style Message Handler
+# Helper: Predict Future Price
+async def predict_price(symbol):
+    try:
+        stock = yf.Ticker(symbol)
+        hist = stock.history(period="30d")
+        if len(hist) < 2:
+            return "Not enough data to predict."
+        last_price = hist['Close'].iloc[-1]
+        prev_price = hist['Close'].iloc[-2]
+        predicted = last_price + (last_price - prev_price)
+        return f"🔮 Tomorrow's estimated price of {symbol.upper()}: ${round(predicted, 2)}"
+    except:
+        return "Prediction failed. Check the symbol."
+
+# Helper: Get Free News from Coingecko
+async def get_news():
+    try:
+        url = "https://api.coingecko.com/api/v3/status_updates"
+        res = requests.get(url).json()
+        updates = res.get("status_updates", [])[:5]
+        if not updates:
+            return "❌ No news available."
+        return "🗞 Latest Crypto/Stock News:\n" + "\n\n".join([f"➡️ {u['project']['name']}: {u['description']}" for u in updates if u.get("project")])
+    except:
+        return "⚠️ Failed to fetch news."
+
+# Commands
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Welcome to AI MarketBot!\nI can give you prices, predictions, and news.\n\nTry typing:\n- BTC\n- AAPL\n- Predict BTC\n- News"
+    )
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🛠 Help Menu:\n\nCommands you can try:\n- AAPL or BTC (for prices)\n- Predict AAPL or Predict BTC (for future price)\n- News (latest headlines)\nJust talk to me like a real person, no need for special commands!"
+    )
+
+# Chat Handler
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text
-    lang = translator.detect(user_input).lang
-    if lang == "fa":
-        user_input = translator.translate(user_input, src="fa", dest="en").text
-
-    text = user_input.lower()
-    response = "🤖 I didn't understand that. Try asking about a crypto or stock."
-
-    if "price" in text:
-        words = text.split()
-        for word in words:
-            price = get_crypto_price(word.lower())
-            if price:
-                response = f"💰 {word.upper()} price: ${price:.2f}"
-                break
+    text = update.message.text.lower()
+    if text.startswith("predict"):
+        symbol = text.split("predict")[-1].strip()
+        msg = await predict_price(symbol)
+        await update.message.reply_text(msg)
     elif "news" in text:
-        response = get_news()
-    elif "predict" in text:
-        words = text.split()
-        for word in words:
-            prediction = predict_price(word.upper())
-            if "Prediction" in prediction:
-                response = prediction
-                break
-    elif any(w in text for w in ["hi", "hello", "salam"]):
-        response = "👋 Hi! Ask me about any crypto or stock, or say 'news' or 'predict BTC'."
+        msg = await get_news()
+        await update.message.reply_text(msg)
+    else:
+        symbol = text.strip().upper()
+        msg = await get_price(symbol)
+        await update.message.reply_text(msg)
 
-    if lang == "fa":
-        response = translator.translate(response, src="en", dest="fa").text
+# Flask route to keep bot alive
+@app.route("/")
+def index():
+    return "Bot is running!"
 
-    await update.message.reply_text(response)
-
-# Bot Setup
+# Main Bot Function
 if __name__ == '__main__':
-    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("✅ Bot is running...")
-    app_bot.run_polling()
+    from threading import Thread
+
+    async def main():
+        application = ApplicationBuilder().token(BOT_TOKEN).build()
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_cmd))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        await application.run_polling()
+
+    def telegram_bot():
+        import asyncio
+        asyncio.run(main())
+
+    Thread(target=telegram_bot).start()
+    app.run(host='0.0.0.0', port=8080)
